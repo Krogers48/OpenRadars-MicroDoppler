@@ -5,38 +5,51 @@ from pathlib import Path
 import gc  # to allow freeing memory promptly
 from scipy.signal import medfilt  # for light "noise reduced" curve
 
+# This script loads raw mmWave ADC data, reshapes it using cfg parameters,
+# computes range then Doppler, separates TX channels, builds a virtual array,
+# and produces figures that show before and after clutter removal along with
+# a micro-Doppler view. It also estimates a wall distance using three formulas.
+
 # --- USER PATHS ---
+# Local file locations. These are machine-specific and can be pointed to
+# another capture if needed.
 source_fp = r"C:\\TIRadarADCData\\dca1000Data\\iqData_Raw_0.bin"
 dest_fp   = r"C:\\TIRadarADCData\\dca1000Data\\iqData_Cooked_0.bin"
 # Optional: TI mmWave config used for this capture (highly recommended)
 cfg_fp    = r"C:\\ti\\mmwave_studio_02_01_01_00\\mmWaveStudio\\PostProc\\xwr68xx_profile_2025_06_08.cfg.txt"
 
 # --- FIGURE OUTPUT CONTROL ---
+# Control whether figures are shown interactively or saved to disk.
 SHOW_FIGS = True                         # set False to avoid blocking at plt.show()
 SAVE_FIGS = False                        # set True to save all figures instead of (or in addition to) showing
 OUT_DIR   = r"C:\\Users\\kaden\\Documents\\OpenRadars\\figs"  # used if SAVE_FIGS=True
 
 # --- TUNABLES ---
+# Analysis constants used by AoA, SNR tests and virtual array assumptions.
 ANGLE_NFFT = 128           # zero-padding for angle FFT
 SNR_DB_MIN = 20.0          # min RD SNR (dB) for using peaks in wall inference
 CALIB_USE_PHASE = True     # apply per-(TX,RX) complex phase calibration if present in cfg
 VIRT_SPACING_LAMBDA = 0.5  # assume λ/2 spacing for ULA
 
 # --- VISUALIZATION OPTIONS ---
+# Select which frame to feature in the RD and AoA figures.
 RD_FRAME = 445   # which frame to visualize in RD & AoA (0 .. num_frames-1)
 
 # --- ADDITIONS to track the paper ---
+# Controls for the ghost-angle cleaning and a guard on trajectory length.
 DEVIATION_THR_DEG = 15.0   # |θ'_meas - θ'_theory| threshold used to "noise-reduce" ghost AoA
 TRACK_MAX_FRAMES  = 300    # cap for per-frame trajectory extraction to limit runtime
 
 
 def bitcount(x: int) -> int:
+    # Utility for counting active RX bits in the channel mask.
     return int(bin(int(x) & 0xFFFFFFFF).count("1"))
 
 # -------------------------------
 # CFG parsing helpers
 # -------------------------------
 def parse_ti_cfg(cfg_path: str):
+    # Pull out high-level parameters from a TI cfg file that affect reshaping.
     cfg_text = Path(cfg_path).read_text()
     rx_en = tx_en = None
     num_adc_samples = None
@@ -54,6 +67,7 @@ def parse_ti_cfg(cfg_path: str):
         elif tok[0] == 'frameCfg':
             chirp_start = int(tok[1]); chirp_end = int(tok[2])
             num_loops = int(tok[3])
+    # Sanity checks help catch a mismatched cfg early.
     assert rx_en is not None and tx_en is not None, 'channelCfg not found in cfg.'
     assert num_adc_samples is not None, 'profileCfg (numAdcSamples) not found in cfg.'
     assert chirp_start is not None and chirp_end is not None and num_loops is not None, 'frameCfg not found in cfg.'
@@ -67,6 +81,7 @@ def parse_ti_cfg(cfg_path: str):
     }
 
 def parse_ti_cfg_details(cfg_path: str):
+    # Pull detailed timing, slope, sample rate and optional calibration info.
     start_freq_ghz = idle_time_us = adc_start_time_us = ramp_end_time_us = None
     slope_mhz_per_us = fs_ksps = None
     range_bias_m = 0.0
@@ -85,6 +100,7 @@ def parse_ti_cfg_details(cfg_path: str):
             slope_mhz_per_us  = float(tok[8])
             fs_ksps           = float(tok[11])
         elif tok[0] == 'compRangeBiasAndRxChanPhase':
+            # If present, use range bias and complex RX calibration.
             try:
                 range_bias_m = float(tok[1])
                 vals = list(map(float, tok[2:]))
@@ -93,6 +109,7 @@ def parse_ti_cfg_details(cfg_path: str):
                     chan_phase = c[0::2] + 1j * c[1::2]
             except Exception:
                 chan_phase = None
+    # Validate that required fields were found.
     if None in (start_freq_ghz, idle_time_us, adc_start_time_us, ramp_end_time_us, slope_mhz_per_us, fs_ksps):
         raise ValueError('profileCfg not found or malformed in cfg file')
     out = {
@@ -112,6 +129,7 @@ def parse_ti_cfg_details(cfg_path: str):
 # Reshape and FFTs
 # -------------------------------
 def reshape_clean_adc(clean_bin_path: str, cfg_params: dict):
+    # Convert the flat interleaved IQ binary into a 5D radar cube based on cfg.
     num_rx          = cfg_params['num_rx']
     num_tx_like     = cfg_params['num_tx_like']
     num_adc_samples = cfg_params['num_adc_samples']
@@ -119,6 +137,7 @@ def reshape_clean_adc(clean_bin_path: str, cfg_params: dict):
 
     raw_i16 = np.fromfile(clean_bin_path, dtype=np.int16)
     if raw_i16.size % 2 != 0:
+        # Drop the last value if the file has an odd length to keep I and Q aligned.
         raw_i16 = np.ascontiguousarray(raw_i16[:-1])
 
     iq = raw_i16.reshape(-1, 2)
@@ -142,10 +161,12 @@ def reshape_clean_adc(clean_bin_path: str, cfg_params: dict):
     used_chirps = num_frames * chirps_per_frame
     data = data[:used_chirps]
 
+    # Final shape is [frames, loops, tx, rx, samples].
     data = data.reshape(num_frames, num_loops, num_tx_like, num_rx, num_adc_samples)
     return data
 
 def _apply_window(x: np.ndarray, win: np.ndarray, axis: int) -> np.ndarray:
+    # Multiply a window along a chosen axis without extra copies.
     x_move = np.moveaxis(x, axis, -1)
     y = x_move * win
     return np.moveaxis(y, -1, axis)
@@ -154,23 +175,20 @@ def range_doppler_with_tx_separation(data: np.ndarray, _params: dict,
                                      n_range: int | None = None,
                                      n_doppler: int | None = None,
                                      clutter_mode: str = "mti"):
-    """Range FFT -> keep one half (reverse if negative half chosen) -> Doppler FFT.
-    Returns:
-      Xr          (f, l, t, r, N_range_half)
-      Xrd_txrx    (f, N_range_half, N_dopp, t, r)
-      Xrd_virtual (f, N_range_half, N_dopp, t*r)
-    """
+    """Range FFT then Doppler FFT. TX channels stay separate to build a virtual array.
+    The function also supports a simple MTI option that suppresses DC per range bin."""
     f, l, t, r, n = data.shape
     if n_range is None:
         n_range = n
     if n_doppler is None:
         n_doppler = l
 
+    # Range FFT
     win_r = np.hanning(n).astype(np.float32)
     Xr = _apply_window(data, win_r, axis=4)
     Xr = np.fft.fft(Xr, n=n_range, axis=4).astype(np.complex64, copy=False)
 
-    # keep one half; reverse if we keep the negative-beat half
+    # Keep only one beat half. If the negative half carries more energy, flip it.
     N  = Xr.shape[-1]
     N2 = N // 2
     pos = Xr[..., :N2]
@@ -179,7 +197,7 @@ def range_doppler_with_tx_separation(data: np.ndarray, _params: dict,
     Eneg = np.sum(np.abs(neg)**2)
     Xr = neg[..., ::-1] if Eneg > Epos else pos  # now index 0 is the smallest |f_b|
 
-    # --- clutter removal along slow-time (per range bin / per TX-RX) ---
+    # Optional clutter removal across slow time per TX and RX.
     if clutter_mode == "mti":
         Xr = Xr - Xr.mean(axis=1, keepdims=True)   # first-order MTI (DC kill)
     elif clutter_mode == "off":
@@ -187,16 +205,14 @@ def range_doppler_with_tx_separation(data: np.ndarray, _params: dict,
     else:
         raise ValueError(f"unknown clutter_mode: {clutter_mode}")
 
-    # Doppler FFT along loops (axis=1), keeping TXs separated
+    # Doppler FFT along loops with TXs still separated.
     win_d = np.hanning(l).astype(np.float32)
     Xrd = _apply_window(Xr, win_d, axis=1)
     Xrd = np.fft.fft(Xrd, n=n_doppler, axis=1).astype(np.complex64, copy=False)
     Xrd = np.fft.fftshift(Xrd, axes=1)
 
-    # (f, N_range_half, N_dopp, t, r)
+    # Reorder to [frame, range, doppler, tx, rx] then flatten tx×rx as the virtual array.
     Xrd_txrx = np.transpose(Xrd, (0, 4, 1, 2, 3))
-
-    # virtual array after Doppler
     n_range_eff = Xrd_txrx.shape[1]
     Xrd_virtual = Xrd_txrx.reshape(f, n_range_eff, n_doppler, t * r)
 
@@ -206,6 +222,7 @@ def range_doppler_with_tx_separation(data: np.ndarray, _params: dict,
 # Axes
 # -------------------------------
 def make_axes(params: dict, n_range: int, n_dopp: int, n_angle: int):
+    # Convert FFT bin indices into physical units for plotting.
     c = 299_792_458.0
     fs = float(params.get('fs_ksps', 0.0)) * 1e3
     n = int(params['num_adc_samples'])
@@ -225,7 +242,7 @@ def make_axes(params: dict, n_range: int, n_dopp: int, n_angle: int):
     lam = c / (float(params.get('start_freq_ghz', 60.0)) * 1e9)
     vel_mps = fd * lam / 2.0
 
-    # Angle axis for λ/2 spacing
+    # Angle grid that assumes λ/2 spacing for a broadside ULA.
     k = np.arange(n_angle) - (n_angle // 2)
     sin_theta = np.clip(2.0 * k / float(n_angle), -1.0, 1.0)
     ang_deg = np.degrees(np.arcsin(sin_theta))
@@ -237,16 +254,19 @@ def make_axes(params: dict, n_range: int, n_dopp: int, n_angle: int):
 def angle_spectrum_cell(Xrd_virtual: np.ndarray, params: dict,
                         frame_idx: int, r_idx: int, d_idx: int,
                         n_angle: int = ANGLE_NFFT) -> np.ndarray:
+    # Build a steering spectrum for the chosen range-Doppler bin.
     t = int(params['num_tx_like'])
     r = int(params['num_rx'])
     x = Xrd_virtual[frame_idx, r_idx, d_idx, :].reshape(t, r)
 
+    # Optional complex calibration per channel to correct phase.
     calib = params.get('chan_phase', None)
     if CALIB_USE_PHASE and (calib is not None) and (calib.size >= t*r):
         calib_v = calib[:t*r].reshape(t, r)
         w = np.conj(calib_v / (np.abs(calib_v) + 1e-12))
         x = x * w
 
+    # If the sequence is TDM-MIMO, compensate for slow-time phase drift across TXs.
     if t > 1:
         Ti = float(params['idle_time_us']) * 1e-6
         Tr = float(params['ramp_end_time_us']) * 1e-6
@@ -280,6 +300,7 @@ def _rti_from_Xr(Xr):
 # -------------------------------
 def extract_angles_vs_range(Xrd_virtual, params, doppler_idx, ang_deg, rng_bins_m,
                             main_mask_deg=10.0, snr_thresh_db=6.0, frame_idx=0):
+    # For a fixed Doppler bin, compute AoA per range and return main and ghost curves.
     R = Xrd_virtual.shape[1]
     ranges_m = rng_bins_m - params.get('range_bias_m', 0.0)
     th_main = np.full(R, np.nan, dtype=np.float32)
@@ -302,6 +323,7 @@ def extract_angles_vs_range(Xrd_virtual, params, doppler_idx, ang_deg, rng_bins_
 
         th_main[r] = ang_deg[k_main]
 
+        # Mask around the main lobe to look for a secondary peak that behaves like a ghost.
         p_db_masked = p_db.copy()
         p_db_masked[max(0, k_main - mask_bins): k_main + mask_bins + 1] = -1e9
         k_ghost = int(np.argmax(p_db_masked))
@@ -313,6 +335,8 @@ def extract_angles_vs_range(Xrd_virtual, params, doppler_idx, ang_deg, rng_bins_
     return ranges_m, th_main, th_ghost
 
 def ghost_angle_theory(a_m, d_m, theta_main_rad):
+    # Analytical relationship between a reflecting wall at distance a
+    # and the ghost AoA given main AoA and target distance.
     cos_t = np.cos(theta_main_rad)
     cos_t = np.where(np.abs(cos_t) < 1e-6, np.nan, cos_t)
     tan_theta_p = (2.0 * a_m / np.maximum(d_m, 1e-6) - np.sin(theta_main_rad)) / cos_t
@@ -322,6 +346,7 @@ def ghost_angle_theory(a_m, d_m, theta_main_rad):
 # Derived metrics & report
 # -------------------------------
 def _derived_metrics(p: dict):
+    # Convenience values derived from cfg for readability in the summary.
     c = 299_792_458.0
     fc_hz = float(p.get('start_freq_ghz', 60.0)) * 1e9
     lam = c / fc_hz
@@ -356,6 +381,7 @@ def _derived_metrics(p: dict):
     }
 
 def print_cfg_report(p: dict):
+    # Write a compact summary so the run is self-describing in the console.
     m = _derived_metrics(p)
     def us(x): return f"{x*1e6:.2f} µs"
     print("\n=== Radar CFG Summary ===")
@@ -380,6 +406,7 @@ def print_cfg_report(p: dict):
 # Geometry: wall inference (2.22, 2.23, 2.24)
 # -------------------------------
 def infer_wall_a_from_d_dprime_theta(d, dprime, theta_rad):
+    # Derived from the relationship between main and ghost ranges at a given angle.
     A = 4.0 * d * np.sin(theta_rad)
     disc = A*A - 16.0*(d*d - dprime*dprime)
     if disc < 0:
@@ -387,9 +414,11 @@ def infer_wall_a_from_d_dprime_theta(d, dprime, theta_rad):
     return (A + np.sqrt(disc)) / 8.0
 
 def infer_wall_a_from_angles(d, theta_rad, theta_prime_rad):
+    # Uses measured main and ghost angles along with target distance.
     return 0.5 * d * (np.cos(theta_rad) * np.tan(theta_prime_rad) + np.sin(theta_rad))
 
 def infer_wall_a_from_vel(d, theta_rad, vr_main, vr_ghost):
+    # Uses radial velocities at main and ghost peaks and the main angle.
     ratio = np.clip(vr_ghost / (vr_main + 1e-12), -1.0, 1.0)
     arg = np.arccos(ratio) - theta_rad
     return 0.5 * d * (np.cos(theta_rad) * np.tan(arg) + np.sin(theta_rad))
@@ -398,8 +427,10 @@ def infer_wall_a_from_vel(d, theta_rad, vr_main, vr_ghost):
 # Main
 # -------------------------------
 if __name__ == "__main__":
+    # Convert raw ADC to complex IQ using the OpenRadar helper.
     parse_raw_adc(source_fp, dest_fp)
 
+    # Read cfg and produce a short report. Exit early if the cfg is incomplete.
     try:
         params = parse_ti_cfg(cfg_fp)
         params.update(parse_ti_cfg_details(cfg_fp))
@@ -408,10 +439,13 @@ if __name__ == "__main__":
 
     print_cfg_report(params)
 
+    # Reshape the IQ stream to [frames, loops, tx, rx, samples] based on cfg.
     data = reshape_clean_adc(dest_fp, params)
     print('Reshaped data shape:', data.shape)
 
     # --- compute BOTH before and after clutter removal ---
+    # The "off" pass preserves the raw slow-time content for comparison.
+    # The "mti" pass suppresses static clutter around zero Doppler.
     Xr_no, Xrd_txrx_no, Xrd_virtual_no = range_doppler_with_tx_separation(data, params, clutter_mode="off")
     Xr,    Xrd_txrx,    Xrd_virtual    = range_doppler_with_tx_separation(data, params, clutter_mode="mti")
     print('After Range FFT (no clutter) :', Xr_no.shape)
@@ -420,14 +454,17 @@ if __name__ == "__main__":
     print('Virtual array cube           :', Xrd_virtual.shape)
 
     # RTI before freeing memory
+    # These are used later to visualize the impact of the MTI step.
     _rti_no_db  = _rti_from_Xr(Xr_no)
     _rti_mti_db = _rti_from_Xr(Xr)
 
+    # Release the largest arrays we no longer need.
     del data
     del Xr
     gc.collect()
 
     # Range–Doppler quicklook (chosen frame, AFTER)
+    # Average across TX and RX, then locate a strong non-zero-Doppler peak and a ghost.
     rd0 = np.abs(Xrd_txrx[RD_FRAME]).mean(axis=(2, 3))
     rd0_db = 20 * np.log10(np.maximum(rd0, 1e-12))
     noise_db = np.median(rd0_db)
@@ -448,6 +485,7 @@ if __name__ == "__main__":
     snr_ghost_db = rd0_db[ghost_idx] - noise_db
     print(f"SNR main ~ {snr_main_db:.1f} dB, SNR ghost ~ {snr_ghost_db:.1f} dB")
 
+    # Build physical axes for range, Doppler, velocity and AoA.
     rng_bins_m, fd_hz, vel_mps, ang_deg = make_axes(
         params,
         n_range=Xrd_virtual.shape[1],
@@ -456,12 +494,14 @@ if __name__ == "__main__":
     )
 
     # Angle spectra at the two RD peaks (AFTER)
+    # Convert both main and ghost RD peaks into AoA estimates using the virtual array.
     spec_main  = angle_spectrum_cell(Xrd_virtual, params, RD_FRAME, peak_idx[0],  peak_idx[1],  n_angle=ANGLE_NFFT)
     spec_ghost = angle_spectrum_cell(Xrd_virtual, params, RD_FRAME, ghost_idx[0], ghost_idx[1], n_angle=ANGLE_NFFT)
     k_main  = int(np.argmax(np.abs(spec_main)));  ang_main_deg  = ang_deg[k_main]
     k_ghost = int(np.argmax(np.abs(spec_ghost))); ang_ghost_deg = ang_deg[k_ghost]
 
     # Wall inference (scalars) if SNR is adequate
+    # Three formulas are evaluated and printed for reference.
     a_22 = a_23 = a_24 = np.nan
     if (snr_main_db >= SNR_DB_MIN) and (snr_ghost_db >= SNR_DB_MIN):
         d  = rng_bins_m[peak_idx[0]]  - params.get('range_bias_m', 0.0)
@@ -479,6 +519,7 @@ if __name__ == "__main__":
     rng_disp = rng_bins_m - params.get('range_bias_m', 0.0)
 
     # 1) Single Range–Doppler (AFTER)
+    # Show the chosen frame with markers at the main and ghost peaks.
     plt.figure(figsize=(10, 6))
     plt.imshow(
         rd0_db, origin='lower', aspect='auto', cmap='jet',
@@ -492,12 +533,14 @@ if __name__ == "__main__":
     plt.legend(loc='upper right')
 
     # 2) Target distance vs AoA (ADD: estimator selection + deviation-thresholded ghost curve)
+    # Build AoA curves across range at the main Doppler bin and compare to theory.
     ranges_m, theta_main_curve, theta_ghost_curve = extract_angles_vs_range(
         Xrd_virtual, params, doppler_idx=peak_idx[1], ang_deg=ang_deg, rng_bins_m=rng_bins_m,
         main_mask_deg=10.0, snr_thresh_db=6.0, frame_idx=RD_FRAME
     )
 
     # ---- ADDED: choose the best 'a' by minimizing AoA deviation to theory ----
+    # Evaluate which estimator best matches the observed ghost AoA curve.
     def _aoa_dev_cost(a_val, th_main_deg, th_ghost_deg, d_m):
         if not np.isfinite(a_val) or a_val <= 0:
             return np.inf
@@ -520,6 +563,7 @@ if __name__ == "__main__":
         theta_theory = ghost_angle_theory(a_use, ranges_m, np.radians(theta_main_curve))
 
     # ---- ADDED: deviation-thresholded "noise-reduced" ghost AoA curve ----
+    # Keep ghost AoA samples that stay close to the theoretical curve and smooth them.
     theta_ghost_clean = np.full_like(theta_ghost_curve, np.nan)
     if theta_theory is not None and np.any(np.isfinite(theta_theory)):
         diff = np.abs(theta_ghost_curve - theta_theory)
@@ -548,6 +592,7 @@ if __name__ == "__main__":
     plt.legend()
 
     # 3) Micro-Doppler (time × velocity) — global (unchanged)
+    # Collapse range and channels to show the velocity content over time.
     power = (np.abs(Xrd_virtual) ** 2).sum(axis=(1, 3))
     F, Nd = power.shape
     plt.figure(figsize=(11, 4))
@@ -558,6 +603,7 @@ if __name__ == "__main__":
     plt.tight_layout()
 
     # ----------------- A/B RD panel (Before vs After) with peak markers + Metrics -----------------
+    # Compute comparable scaling and a simple measure of zero-Doppler attenuation.
     rd_no_db, rd_no_lin = _rd_power_db_from_txrx(Xrd_txrx_no, RD_FRAME)  # BEFORE (chosen frame)
     rd_mti_db = rd0_db                                                   # AFTER  (chosen frame)
     vmin_ab, vmax_ab = np.percentile(rd_no_db, [5, 99])
@@ -575,6 +621,7 @@ if __name__ == "__main__":
     noise_mti = float(np.median(rd_mti_db))
 
     # -------- BEFORE peak: NAÏVE (no zero-Doppler mask) ----------
+    # Show that a direct peak pick before MTI can land on the clutter ridge.
     N_dopp_pre = rd_no_db.shape[1]
     peak_idx_pre_naive = np.unravel_index(np.argmax(rd_no_db), rd_no_db.shape)
     is_clutter_pick = (abs(peak_idx_pre_naive[1] - N_dopp_pre // 2) <= max(1, N_dopp_pre // 64))
@@ -621,6 +668,7 @@ if __name__ == "__main__":
                   bbox=dict(facecolor='k', alpha=0.3, pad=6), color='w')
 
     # ----------------- RTI (Range–Time) Before/After -----------------
+    # Show the range evolution across frames, with and without MTI.
     vmin_rti, vmax_rti = np.percentile(_rti_no_db, [5, 99])
 
     plt.figure(figsize=(12, 5))
@@ -638,6 +686,7 @@ if __name__ == "__main__":
     plt.tight_layout()
 
     # ----------------- Adaptive range-weighted Micro-Doppler (keeps full walk) -----------------
+    # Weight Doppler by a soft window that follows the target's range trajectory.
     v_abs = np.abs(vel_mps)
     dop_mask = (v_abs >= 0.10) & (v_abs <= 3.00)
 
@@ -673,7 +722,7 @@ if __name__ == "__main__":
     plt.tight_layout()
 
     # ----------------- ADDED: Cartesian trajectories (x–y) over time -----------------
-    # Derive per-frame main & ghost positions using AFTER-cube peak/ghost AoA and range.
+    # Convert per-frame main and ghost estimates into simple x-y tracks.
     F_all = Xrd_virtual.shape[0]
     F_use = min(F_all, TRACK_MAX_FRAMES)
     x_main = np.full(F_use, np.nan, dtype=np.float32)
@@ -689,14 +738,14 @@ if __name__ == "__main__":
         rd_f_mod[:, N_d//2 - cw : N_d//2 + cw] = -1e9
         pk_r, pk_d = np.unravel_index(np.argmax(rd_f_mod), rd_f_mod.shape)
 
-        # ghost candidate (suppress vicinity of main + bias to lower-left like demo)
+        # A crude ghost pick that avoids the main peak and the top-right quadrant.
         rd_g = 20*np.log10(np.maximum(rd_f_mod, 1e-12))
         rd_g[max(0, pk_r - 2): pk_r + 3, max(0, pk_d - 3): pk_d + 4] = -1e9
         rd_g[: pk_r + 1, :] = -1e9
         rd_g[:, pk_d:] = -1e9
         gh_r, gh_d = np.unravel_index(np.argmax(rd_g), rd_g.shape)
 
-        # AoA for main/ghost
+        # Convert RD to AoA then to simple Cartesian coordinates in the radar plane.
         spec_m = angle_spectrum_cell(Xrd_virtual, params, fidx, pk_r, pk_d, n_angle=ANGLE_NFFT)
         spec_g = angle_spectrum_cell(Xrd_virtual, params, fidx, gh_r, gh_d, n_angle=ANGLE_NFFT)
         km = int(np.argmax(np.abs(spec_m))); kg = int(np.argmax(np.abs(spec_g)))
@@ -723,6 +772,7 @@ if __name__ == "__main__":
     plt.legend()
 
     # ---------- SHOW / SAVE ----------
+    # Save figures to OUT_DIR if requested and show them otherwise.
     if SAVE_FIGS:
         from pathlib import Path as _P
         outdir = _P(OUT_DIR)
@@ -739,3 +789,4 @@ if __name__ == "__main__":
             pass
     else:
         plt.close('all')
+
