@@ -1,23 +1,33 @@
-# sphinx build files
-doc/build
-
-# setup.py
-*.egg-info
-build
-dist
-
-# jupyter notebook
-.ipynb_checkpoints/
-*/.ipynb_checkpoints/*
-
-venv/
-.vscode/
-.cache/
+﻿# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+
+# IDE
+.vscode/
 .idea/
-data/
+
+# OS
 .DS_Store
 
+# Data / binaries (avoid pushing large radar files)
+*.bin
+*.dat
+*.mat
+*.npy
+*.npz
 
-
+# Figures and tmp
+figs/
+*.png
+*.jpg
+*.pdf
