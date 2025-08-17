@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import os  # added
 
 win_name = 'track'
 win_size = 950
@@ -26,7 +27,16 @@ BLUE = (255, 0, 0)
 
 font = cv2.FONT_HERSHEY_SIMPLEX
 
-smiley = cv2.imread('./smiley.png')
+# ---- robust smiley.png loading (module-relative) with fallback placeholder ----
+asset_path = os.path.join(os.path.dirname(__file__), 'smiley.png')
+smiley = cv2.imread(asset_path, cv2.IMREAD_COLOR)
+if smiley is None:
+    # fallback: draw a simple yellow disk so the viewer still works
+    r = radius
+    smiley = np.zeros((2 * r, 2 * r, 3), dtype=np.uint8)
+    cv2.circle(smiley, (r, r), r, (0, 255, 255), -1)
+# -----------------------------------------------------------------------------
+
 smiley_mask = np.zeros(smiley.shape)
 smiley_width = smiley.shape[1]
 smiley_height = smiley.shape[0]

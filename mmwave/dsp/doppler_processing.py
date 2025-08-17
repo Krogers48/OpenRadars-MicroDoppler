@@ -67,7 +67,7 @@ def separate_tx(signal, num_tx, vx_axis=1, axis=0):
 
 
 def doppler_processing(radar_cube,
-                       num_tx_antennas=2,
+                       num_tx_antennas=3,
                        clutter_removal_enabled=False,
                        interleaved=True,
                        window_type_2d=None,
@@ -129,8 +129,10 @@ def doppler_processing(radar_cube,
     # original code.
 
     # Log_2 Absolute Value
-    fft2d_log_abs = np.log2(np.abs(fft2d_out))
-
+    # Log_2 Absolute Value  (make it safe for zeros)
+    mag = np.abs(fft2d_out)
+    np.maximum(mag, np.finfo(mag.dtype).tiny, out=mag)  # clamp zeros to tiny > 0
+    fft2d_log_abs = np.log2(mag)
     # Accumulate
     if accumulate:
         return np.sum(fft2d_log_abs, axis=1), aoa_input
