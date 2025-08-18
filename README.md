@@ -1,62 +1,69 @@
-# PreSense mmWave Package
+# Krogers mmWave Package
 
-[![Version](https://img.shields.io/pypi/v/ipyvolume.svg)](https://pypi.org/project/openradar/)
-[![Documentation](https://readthedocs.org/projects/openradar/badge/?version=latest)](https://openradar.readthedocs.io/en/latest/?badge=latest)
 
-This is PreSense team's implementation of TI mmwave radar DSP stack and some demos.
-We are grateful for TI, TI's e2e forum and other people's help to make this happen.
-Please star us if you like this repository and please consider citing this repo if you used it in your research.
+This repository contains our implementation of TI IWR6843 + DCA1000 radar data processing, centered around `main.py`.  
+The script reads raw ADC captures and generates plots that demonstrate the importance of clutter removal and the extraction of gait signatures.  
 
-The toolbox is modularized into separate steps
-1. Reading raw ADC data.
-2. Preprocessing data in DSP stack.
-3. Utilizing preprocessed data for tracking, clustering and machine learning.
-4. Different demo implementations from TI and our own explorations.
+The pipeline includes:
+1. Reading raw ADC data and TI profile configuration.
+2. Range and Doppler FFT processing with angle estimation.
+3. A/B plots of Range–Doppler and Range–Time (before vs after clutter removal).
+4. Micro-Doppler spectrogram of a walking subject.
+5. Wall distance estimation using formulas from the thesis and filtering against the theoretical ghost curve.
 
 ## Documentation
 - [openradar.readthedocs.io](https://openradar.readthedocs.io)
 
-## Contact 
-
-- Please submit issues to our [GitHub](https://github.com/presenseradar/openradar) if you found any bugs or have any suggestions
-- For anything else, send an email at presenseradar@gmail.com
-
 ## Directory Structure
-    .
-    ├── data                    # Small size sample data.
-    ├── demo                    # Python implementations of TI demos.
-    ├── docs                    # Documentation for mmwave pacakge and hardware setup.
-    ├── mmwave                  # mmwave package including all the DSP, tracking, etc algorithms.
-    ├── PreSense Applied radar  # Jupyter notebook series explaining how apply radar concepts to real data
-    ├── scripts                 # Various setup scripts for mmwavestudio, etc
-    ├── .gitignore
-    ├── LICENSE
-    ├── README.md
-    ├── requirements.txt        # Required dependencies to run this package.
-    └── setup.py                # Install mmwave package.
+```bash
+.
+├── data                    # Small size sample data.
+├── demo                    # Python implementations of TI demos.
+├── docs                    # Documentation for mmwave package and hardware setup.
+├── mmwave                  # mmwave package including all the DSP, tracking, etc algorithms.
+├── PreSense Applied radar  # Jupyter notebook series explaining how apply radar concepts to real data
+├── scripts                 # Various setup scripts for mmwavestudio, etc
+├── Krogers/
+│   └── MicroDoppler/
+│       ├── main.py                  # Entry point for all processing and plots
+│       ├── draft.py                 # Prototype / scratchpad script
+│       └── PersonWalkingData/
+│           ├── iqData_Raw_0.bin     # Raw ADC capture from DCA1000
+│           ├── iqData_Cooked_0.bin  # preprocessed copy written by main.py
+│           ├── iqData_Raw_LogFile.csv
+│           ├── iqData_RecordingParameters.mat
+│           └── xwr68xx_profile_2025_06_08.cfg.txt  # TI radar configuration file
+├── .gitignore
+├── LICENSE
+├── README.md
+├── requirements.txt        # Required dependencies to run this package.
+└── setup.py                # Install mmwave package.
+```
 
-## Current Roadmap for this package
-- [ ] Code refactoring for better API support.
-- [ ] More tutorials to help people get started on FMCW radar.
-- [ ] More AoA methods support.
-- [ ] More noise removal algorithms.
+## Current Roadmap for this project
+- [ ] Promote the tunable parameters in `main.py` (frame index, save options, thresholds) to command-line arguments.
+- [ ] Add automatic wall-distance tracking over time with stability metrics.
+- [ ] Package consistent plotting helpers for A/B comparisons (shared color scales, labeled metrics).
+- [ ] Support live/online processing mode instead of only offline `.bin` playback.
+- [ ] Integrate Wigait’s stable phase extraction algorithm for gait features.
+
 
 ## Future Plan
-1. Hardware Abstraction Layer, e.g. hardware-agnostic data reading or processing.
-2. ML on radar (classification, detection, tracking, etc).
+1. Convert the processing pipeline to a live processing script
+2. Implement a stable walking phase algorithm
 
 
 ## Installation
 
 ### Pip installation
 ```
-pip install openradar
+pip install OpenRadars-MicroDoppler
 ```
 
 ### Debug Mode
 ```
-git clone https://github.com/presenseradar/openradar
-cd openradar
+git clone https://github.com/Krogers48/OpenRadars-MicroDoppler
+cd OpenRadars-MicroDoppler
 pip install -r requirements.txt
 python setup.py develop
 ```
@@ -64,7 +71,7 @@ python setup.py develop
 ## Uninstallation
 
 ```
-pip uninstall openradar
+pip uninstall OpenRadars-MicroDoppler
 ```
 
 ## Example Import and Usage
@@ -78,20 +85,25 @@ adc_data = dca.read()
 radar_cube = mm.dsp.range_processing(adc_data)
 ```
 
-## Citation
+## Running main.py
 
-Please cite OpenRadar in your publications if it helps your research. Here is an example BibTeX entry:
+Place your capture (`iqData_Raw_0.bin`) and matching TI profile (`xwr68xx_profile_2025_06_08.cfg.txt`) into:
+
+
+Krogers/MicroDoppler/PersonWalkingData/
+
+Run the script:
+
+```bash
+python Krogers/MicroDoppler/main.py
+The script will produce:
+
+Range–Doppler BEFORE vs AFTER plots with clutter metrics
+
+Range–Time (RTI) BEFORE vs AFTER
+
+Micro-Doppler spectrogram
+
+Printed wall distance estimate
 
 ```
-@misc{openradar2019,
-  author = {Pan, Edwin and Tang, Jingning and Kosaka, Dash and Yao, Ruihao and Gupta, Arjun},
-  title = {OpenRadar},
-  year = {2019},
-  publisher = {GitHub},
-  journal = {GitHub repository},
-  howpublished = {\url{https://github.com/presenseradar/openradar}}
-}
-```
-
-## Acknowledgement
-The PreSense team wants to thank Prof. [Sanjay Patel](https://ece.illinois.edu/directory/profile/sjp), without whom this project wouldn't be possible. We are also grateful for the generous sponsorship from The IBM-ILLINOIS Center for Cognitive Computing Systems Research ([C3SR](https://www.c3sr.com/)) and the guidance/leadership from [Jinjun Xiong](https://researcher.watson.ibm.com/researcher/view.php?person=us-jinjun) of IBM and Prof. [Wen-Mei Hwu](https://ece.illinois.edu/directory/profile/w-hwu). Special thanks to Prof. [Haitham Hassanieh](http://haitham.ece.illinois.edu/) and Prof. [Minh M. Do](http://minhdo.ece.illinois.edu/) for the techical advice and Texas Instruments&trade; for the hardware support.
