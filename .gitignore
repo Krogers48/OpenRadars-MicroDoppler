@@ -138,3 +138,8 @@ dmypy.json
 cython_debug/
 
 .vscode/
+# ignore old top-level clones
+/mmwave/
+/gtrack/
+/fpga_udp/
+/matlabExample/
