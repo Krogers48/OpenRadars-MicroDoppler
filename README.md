@@ -119,11 +119,8 @@ This script is a **self-contained real-time radar gait engine**. It:
 
 ---
 
-## End-to-End Script Capabilities (Appendix)
 
-A complete, formal description of everything implemented in `realTimeProc_IWR6843ISK_1_1.py` is provided as an appendix and is also appended verbatim to the bottom of the script itself.
-
-**Appendix – End-to-End Script Capabilities** documents:
+**Appendix – End-to-End Script Capabilities**:
 
 * Hardware control and capture
 * Signal processing pipeline
@@ -131,8 +128,6 @@ A complete, formal description of everything implemented in `realTimeProc_IWR684
 * Tracking and walking speed estimation
 * Cadence, step timing, and asymmetry computation
 * Outputs, logging, and data products
-
-This appendix is the authoritative reference for what the radar pipeline *actually does*, independent of visualization.
 
 ---
 
