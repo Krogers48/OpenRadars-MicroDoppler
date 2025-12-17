@@ -143,3 +143,8 @@ cython_debug/
 /gtrack/
 /fpga_udp/
 /matlabExample/
+
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
